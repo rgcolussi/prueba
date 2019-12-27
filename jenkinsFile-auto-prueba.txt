@@ -1,0 +1,145 @@
+pipeline {
+    /**
+    * Environmental variables
+    */
+    environment {
+        /**
+        * Id of Jenkins credentials
+        */
+        registryCredential = 'usr_jenkins'
+        /**
+         * Credentials for Jenkis
+         */
+        USR_JENKINS = credentials('usr_jenkins')
+        /** 
+        * Name of the image using for building the test image
+        */
+        IMAGE_NAME = 'nbch/esb-automated-test'
+
+        /**
+        * Project repository
+        */
+        PROJECT = 'https://git.nbch.com.ar/scm/hom/esb-automation.git'
+        /**
+        * Data repository
+        */
+        DATA = 'https://git.nbch.com.ar/scm/hom/esb-automation-datos.git'
+        DATA_BRANCH = 'master'
+    }
+
+    agent any
+
+    parameters {
+        choice(name:'BRANCH', choices: ['master','dev', 'master'], description: 'dev: Run the tests without publishing the docker image')
+    }
+
+    stages {
+        stage("Checkout SCM") {
+            agent {
+                docker {
+                    image 'alpine'
+                }
+            }
+            steps {
+                dir('checkout') {
+                    git branch: "${params.BRANCH}",
+                    credentialsId: "${registryCredential}",
+                    url: "${PROJECT}"
+                }
+                dir('data') {
+                    git branch: "${DATA_BRANCH}",
+                    credentialsId: "${registryCredential}",
+                    url: "${DATA}"
+                }
+                sh 'ls -lh'
+                sh 'pwd'
+            }
+        }
+        stage("Publish docker image") {
+            agent {
+                docker {
+                    image 'gradle:4.10.3-jdk8-alpine'
+                    args '-u root:root'
+                }
+            }
+            when {
+                expression {
+                    params.BRANCH == 'master'
+                }
+            }
+            steps {
+                sh 'apk --update add git openssh'
+                sh 'pwd'
+                sh 'echo Este paso va a publicar en nexus'
+                sh 'export'
+                sh 'ls -lh'
+                dir('checkout') {
+                    dir('project') {
+                        script {
+                            env.VERSION = sh(returnStdout: true, script: 'echo $(gradle properties | grep version | awk "{print $2}")')   
+                        }
+                    }
+                    sh 'export'
+                    echo "${env.VERSION}"
+                    sh 'ls -lh'
+                    sh 'git status'
+                }
+            }
+        }
+        stage("Build docker image") {
+            options {
+                skipDefaultCheckout()
+            }
+            agent {
+                docker {
+                    image 'docker'
+                    args '-u root:root -v /var/run/docker.sock:/var/run/docker.sock'
+                }
+            }
+            steps {
+                sh 'mv --verbose data/* checkout/project/samples/'
+                dir('checkout/project') {
+                    script {
+                        docker.build('${IMAGE_NAME}:latest')
+                    }
+                }
+                sh 'docker inspect --type=image ${IMAGE_NAME}:latest'
+            }
+        }
+        stage("Run gradle tests") {
+            options {
+                skipDefaultCheckout()
+            }
+            agent {
+                docker {
+                    image '${IMAGE_NAME}:latest'
+                    args '--entrypoint ""'
+                }
+            }
+            steps {
+                dir('checkout/project') {
+                    //sh 'gradle clean'
+                    //sh 'gradle --no-daemon AllTest'
+                }
+            }
+            /* post {
+                always {
+                    dir('checkout/project/build/allure-results') {
+                        stash 'allure-results'
+                    }
+                }
+            } */
+        }
+        
+    }
+    post {
+        always {
+            /* dir('allure-results') {
+                unstash 'allure-results'
+            } */
+            sh 'rm -rf *'
+            //allure results: [[path: 'allure-results']]
+            cleanWs()
+        }
+    }
+}
